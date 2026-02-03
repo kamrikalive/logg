@@ -23,58 +23,52 @@ logger = logging.getLogger("yc-logs-sdk")
 
 
 def get_sdk():
-    """
-    Создает и авторизует Yandex Cloud SDK.
-    Поддерживает:
-    1) IAM token
-    2) Service Account JSON
-    3) Metadata Service (если внутри YC)
-    """
-    # 1️⃣ IAM Token (быстро и просто)
-    token = os.environ.get("YC_IAM_TOKEN")
+    # 1️⃣ IAM token
+    token = os.getenv("YC_IAM_TOKEN")
     if token:
         logger.info("Auth via YC_IAM_TOKEN")
         return yandexcloud.SDK(iam_token=token)
 
     # 2️⃣ Service Account JSON
-    sa_key_raw = os.environ.get("YC_SA_KEY_JSON")
+    sa_key_raw = os.getenv("YC_SA_KEY_JSON")
     if sa_key_raw:
-        try:
-            logger.info("Auth via YC_SA_KEY_JSON")
-            service_account_key = json.loads(sa_key_raw)
-            return yandexcloud.SDK(service_account_key=service_account_key)
-        except Exception as e:
-            logger.error("Failed to parse YC_SA_KEY_JSON", exc_info=e)
+        logger.info("Auth via YC_SA_KEY_JSON")
+        return yandexcloud.SDK(service_account_key=json.loads(sa_key_raw))
 
-    # 3️⃣ Metadata Service (внутри Yandex Cloud)
+    # 3️⃣ Metadata (внутри YC)
     try:
-        logger.info("Trying Metadata Service auth")
         url = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
         headers = {"Metadata-Flavor": "Google"}
         resp = requests.get(url, headers=headers, timeout=1)
-
         if resp.status_code == 200:
-            token = resp.json().get("access_token")
             logger.info("Auth via Metadata Service")
-            return yandexcloud.SDK(iam_token=token)
+            return yandexcloud.SDK(iam_token=resp.json()["access_token"])
     except Exception:
-        logger.warning("Metadata Service unavailable")
+        pass
 
-    raise RuntimeError(
-        "No valid authentication found. "
-        "Set YC_IAM_TOKEN, YC_SA_KEY_JSON or run inside Yandex Cloud."
+    raise RuntimeError("YC auth not found")
+
+
+def get_log_group_id() -> str:
+    log_group_id = (
+        os.getenv("YC_LOG_GROUP_ID")
+        or os.getenv("YC_DEFAULT_LOG_GROUP_ID")
     )
+    if not log_group_id:
+        raise RuntimeError("YC_LOG_GROUP_ID not set")
+    return log_group_id
 
 
 def read_logs(
     *,
-    log_group_id: str,
     resource_id: str,
     since_dt,
     until_dt,
     page_size: int = 100,
     page_token: str = "",
 ):
+    log_group_id = get_log_group_id()
+
     logger.info(
         "Reading logs",
         extra={
@@ -88,7 +82,6 @@ def read_logs(
     sdk = get_sdk()
     client = sdk.client(LogReadingServiceStub)
 
-    # datetime -> protobuf Timestamp
     since_ts = Timestamp()
     since_ts.FromDatetime(since_dt)
 
@@ -101,10 +94,13 @@ def read_logs(
         since=since_ts,
         until=until_ts,
         page_size=page_size,
+    )
+
+    request = ReadRequest(
+        criteria=criteria,
         page_token=page_token or "",
     )
 
-    request = ReadRequest(criteria=criteria)
     response = client.Read(request)
 
     logger.info(
