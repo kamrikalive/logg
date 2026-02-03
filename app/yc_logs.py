@@ -65,20 +65,9 @@ def read_logs(
     since_dt,
     until_dt,
     page_size: int = 100,
-    page_token: str = "",
+    page_token: str | None = None,
 ):
     log_group_id = get_log_group_id()
-
-    logger.info(
-        "Reading logs",
-        extra={
-            "log_group_id": log_group_id,
-            "resource_id": resource_id,
-            "page_size": page_size,
-            "page_token": bool(page_token),
-        },
-    )
-
     sdk = get_sdk()
     client = sdk.client(LogReadingServiceStub)
 
@@ -88,27 +77,19 @@ def read_logs(
     until_ts = Timestamp()
     until_ts.FromDatetime(until_dt)
 
-    criteria = Criteria(
-        log_group_id=log_group_id,
-        resource_ids=[resource_id],
-        since=since_ts,
-        until=until_ts,
-        page_size=page_size,
-    )
-
-    request = ReadRequest(
-        criteria=criteria,
-        page_token=page_token or "",
-    )
+    if page_token:
+        # 🔁 Пагинация — ТОЛЬКО page_token
+        request = ReadRequest(page_token=page_token)
+    else:
+        # 🆕 Первый запрос — ТОЛЬКО criteria
+        criteria = Criteria(
+            log_group_id=log_group_id,
+            resource_ids=[resource_id],
+            since=since_ts,
+            until=until_ts,
+            page_size=page_size,
+        )
+        request = ReadRequest(criteria=criteria)
 
     response = client.Read(request)
-
-    logger.info(
-        "Logs fetched",
-        extra={
-            "entries": len(response.entries),
-            "next_page_token": bool(response.next_page_token),
-        },
-    )
-
     return response
