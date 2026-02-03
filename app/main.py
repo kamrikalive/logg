@@ -1,12 +1,25 @@
+import os
+import logging
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, timedelta
-import os
+
 from app.yc_logs import read_logs
+
+# =========================
+# LOGGING CONFIG
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("logs-service")
+
+logger.info("🚀 Logs service booting")
 
 app = FastAPI(title="YC Logs Service")
 
-# Разрешаем CORS, чтобы фронт (если нужно) или бэк могли ходить свободно
+# CORS (можно сузить позже)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,9 +27,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.get("/logs")
 def get_logs(
@@ -27,13 +42,22 @@ def get_logs(
 ):
     log_group_id = os.environ.get("YC_LOG_GROUP_ID")
     if not log_group_id:
+        logger.error("YC_LOG_GROUP_ID not set")
         raise HTTPException(500, "YC_LOG_GROUP_ID is not set")
+
+    logger.info(
+        "Incoming logs request",
+        extra={
+            "container_id": container_id,
+            "hours": hours,
+            "limit": limit,
+        },
+    )
 
     now = datetime.utcnow()
     since = now - timedelta(hours=hours)
 
     try:
-        # Передаем datetime объекты, конвертация внутри read_logs
         resp = read_logs(
             log_group_id=log_group_id,
             resource_id=container_id,
@@ -43,28 +67,34 @@ def get_logs(
             page_token=page_token or "",
         )
     except Exception as e:
-        print(f"Error reading logs: {e}")
+        logger.exception("Error reading logs from YC")
         raise HTTPException(500, f"Provider error: {str(e)}")
 
     logs = []
-    # gRPC ответ -> JSON
+
     for entry in resp.entries:
-        # Конвертируем Protobuf Timestamp обратно в строку
-        ts_seconds = entry.timestamp.seconds
-        ts_nanos = entry.timestamp.nanos
-        dt_obj = datetime.utcfromtimestamp(ts_seconds) + timedelta(microseconds=ts_nanos / 1000)
-        
+        # Protobuf Timestamp -> ISO
+        dt_obj = (
+            datetime.utcfromtimestamp(entry.timestamp.seconds)
+            + timedelta(microseconds=entry.timestamp.nanos / 1000)
+        )
+
         logs.append({
             "timestamp": dt_obj.isoformat() + "Z",
             "level": entry.level,
-            "message": entry.message or (
+            "message": entry.message
+            or (
                 entry.json_payload.get("message")
                 if entry.json_payload else ""
             ),
-            # json_payload в SDK это Struct, превращаем в dict
             "json": dict(entry.json_payload) if entry.json_payload else {},
-            "stream": entry.json_payload.get("stream") if entry.json_payload else "stdout"
+            "stream": (
+                entry.json_payload.get("stream")
+                if entry.json_payload else "stdout"
+            ),
         })
+
+    logger.info("Response ready", extra={"count": len(logs)})
 
     return {
         "logs": logs,

@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import requests
 import yandexcloud
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -11,42 +12,59 @@ from yandex.cloud.logging.v1.log_reading_service_pb2_grpc import (
     LogReadingServiceStub,
 )
 
+# =========================
+# LOGGING CONFIG
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("yc-logs-sdk")
+
+
 def get_sdk():
     """
-    Создает и авторизует SDK, пытаясь использовать разные методы (как в Node.js)
+    Создает и авторизует Yandex Cloud SDK.
+    Поддерживает:
+    1) IAM token
+    2) Service Account JSON
+    3) Metadata Service (если внутри YC)
     """
-    # 1. Прямой IAM Token (для быстрых тестов)
+    # 1️⃣ IAM Token (быстро и просто)
     token = os.environ.get("YC_IAM_TOKEN")
     if token:
-        # print("[Auth] Using YC_IAM_TOKEN")
+        logger.info("Auth via YC_IAM_TOKEN")
         return yandexcloud.SDK(iam_token=token)
 
-    # 2. JSON-ключ сервисного аккаунта (Аналог вашего generateJwt в Node.js)
-    # SDK сам сделает JWT, подпишет его и обменяет на IAM Token.
+    # 2️⃣ Service Account JSON
     sa_key_raw = os.environ.get("YC_SA_KEY_JSON")
     if sa_key_raw:
         try:
-            # print("[Auth] Using YC_SA_KEY_JSON")
+            logger.info("Auth via YC_SA_KEY_JSON")
             service_account_key = json.loads(sa_key_raw)
             return yandexcloud.SDK(service_account_key=service_account_key)
         except Exception as e:
-            print(f"[Auth] Error parsing YC_SA_KEY_JSON: {e}")
+            logger.error("Failed to parse YC_SA_KEY_JSON", exc_info=e)
 
-    # 3. Metadata Service (Работает внутри контейнера в Yandex Cloud)
+    # 3️⃣ Metadata Service (внутри Yandex Cloud)
     try:
+        logger.info("Trying Metadata Service auth")
         url = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
         headers = {"Metadata-Flavor": "Google"}
-        # print(f"[Auth] Trying Metadata Service: {url}")
         resp = requests.get(url, headers=headers, timeout=1)
+
         if resp.status_code == 200:
             token = resp.json().get("access_token")
-            # print("[Auth] Successfully received token from Metadata")
+            logger.info("Auth via Metadata Service")
             return yandexcloud.SDK(iam_token=token)
-    except Exception as e:
-        # Игнорируем ошибку, если мы не в облаке
-        pass
+    except Exception:
+        logger.warning("Metadata Service unavailable")
 
-    raise ValueError("No valid authentication found. Please set YC_SA_KEY_JSON or run inside Yandex Cloud.")
+    raise RuntimeError(
+        "No valid authentication found. "
+        "Set YC_IAM_TOKEN, YC_SA_KEY_JSON or run inside Yandex Cloud."
+    )
+
 
 def read_logs(
     *,
@@ -57,11 +75,20 @@ def read_logs(
     page_size: int = 100,
     page_token: str = "",
 ):
-    # Получаем авторизованный SDK
+    logger.info(
+        "Reading logs",
+        extra={
+            "log_group_id": log_group_id,
+            "resource_id": resource_id,
+            "page_size": page_size,
+            "page_token": bool(page_token),
+        },
+    )
+
     sdk = get_sdk()
     client = sdk.client(LogReadingServiceStub)
 
-    # Конвертация datetime -> Protobuf Timestamp
+    # datetime -> protobuf Timestamp
     since_ts = Timestamp()
     since_ts.FromDatetime(since_dt)
 
@@ -79,5 +106,13 @@ def read_logs(
 
     request = ReadRequest(criteria=criteria)
     response = client.Read(request)
+
+    logger.info(
+        "Logs fetched",
+        extra={
+            "entries": len(response.entries),
+            "next_page_token": bool(response.next_page_token),
+        },
+    )
 
     return response
